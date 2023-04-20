@@ -1,0 +1,133 @@
+#!/bin/bash
+#
+# Copyright (c) Micron Technology, Inc., 2022. All Rights Reserved.
+# This software contains confidential information and trade secrets of Micron Technology, Inc.
+# Use, disclosure, or reproduction is prohibited without the prior express written permission of Micron Technology, Inc
+#
+#
+
+start=$(date +%s)
+durations=$(date --rfc-3339=seconds)
+
+if [[ -f "~/.profile" ]]; then
+  . ~/.profile
+fi
+if [[ -f "/etc/profile" ]]; then
+  . /etc/profile
+fi
+
+PATH=/usr/local/bin:$PATH
+params=$*
+echo "${params^^}"
+[[ "${params^^}" != *"FAUX"* ]] && dry_run="False" || dry_run="True"
+echo "dry_run: $dry_run"
+
+[[ "${params^^}" != *"DIRTY"* ]] && dirty="False" || dirty="True"
+echo "dirty: $dirty"
+
+[[ "${params^^}" != *"NO_BIT"* ]] && bit="True" || bit="False"
+echo "bit: $bit"
+
+[[ "${params^^}" != *"NO_TEST"* ]] && test="True" || test="False"
+echo "test: $test"
+
+[[ "${params^^}" != *"NO_BUILD"* ]] && build="True" || build="False"
+echo "build: $build"
+
+wrkspc=~/workspace
+prj_dir=$wrkspc/nightly
+test_dir=$prj_dir/regression-scripts
+comp_src=$prj_dir/iecompiler
+bitfiles=$prj_dir/bitfiles
+token=
+repo_path=https://bitbucket.micron.com/bbdc/scm/mdla/iecompiler.git
+time_log=$prj_dir/nightly_time.log
+nnef_src=$prj_dir/NNEF_TOOLS
+target_hw=AC511
+sonar_path=/home/dlaqa_team01/.local/bin/sonar-scanner
+sonarproperties_path=$prj_dir/sonar-scanner.properties
+
+if [[ -d "$comp_src" && "$dry_run" == "False" && "$dirty" == "False" ]] ; then
+    echo "Removing existing $comp_src"
+    rm -rf $comp_src
+    sleep 1
+else
+    echo "Skipping cleaning of $comp_src"
+fi
+
+start_job=$(date +%s)
+if [[ "$dry_run" == "False" && "$dirty" == "False" ]] ; then
+    echo "Starting the cloning of $repo_path"
+    for try in {1..10} ; do
+        git clone -c http.extraHeader="Authorization: Bearer $token" $repo_path $comp_src
+        [[ -d "$comp_src" ]] && break
+        echo "Cloning failed will try again in 60s"
+        sleep 60
+    done
+else
+    echo "Skipping cloning of $repo_path"
+    sleep 1
+fi
+durations="$durations:Clone:$(($(date +%s)-$start_job))s"
+
+if [[ -d "$comp_src" ]] ; then
+    cd $comp_src
+
+    echo "Check if sonar scanner exists"
+    if test -f "$sonar_path"; then
+        echo "$sonar_path file exists. Start scanning."
+        $sonar_path -Dproject.settings=$sonarproperties_path
+        echo "Sonar-scanning end"
+    else
+        echo "$sonar_path not found. Skip scanning"
+    fi
+
+    start_job=$(date +%s)
+    if [[ "$dry_run" == "False" && "$build" == "True" ]] ; then
+        echo "Starting build of $comp_src"
+        make NNEF=1 -j INCLUDENNEFPATH=$nnef_src/parser/cpp/include LIBNNEFPATH=$nnef_src/parser/cpp/build
+        cp $test_dir/compiler_daily_regression.py $comp_src/pytest/
+    else
+        echo "Skipping building of $comp_src"
+        sleep 2
+    fi
+    durations="$durations:Build:$(($(date +%s)-$start_job))s"
+
+    for bf in $(grep $target_hw bitfiles.txt) ; do
+        start_job=$(date +%s)
+        if [[ "$dry_run" == "False" && "$bit" == "True" ]] ; then
+            echo "Starting upload of ${bf}"
+            ./test_compiler -h 1_0 -b $bitfiles/${bf}
+        else
+            echo "Skipping upload of ${bf}"
+            sleep 3
+        fi
+        durations="$durations:Flash ${bf}:$(($(date +%s)-$start_job))s"
+
+        cd pytest
+        start_job=$(date +%s)
+        if [ "${bf#*vfp*}" != $bf ]; then
+            if [[ "$dry_run" == "False" && "$test" == "True" ]] ; then
+                echo "Starting test with vfp"
+                ./compiler_daily_regression.py 'vfp' $comp_src
+            else
+                echo "Skipping test of 'vfp'"
+                sleep 4
+            fi
+            durations="$durations:VFP reg"
+        else
+            if [[ "$dry_run" == "False" && "$test" == "True"  ]] ; then
+                echo "Starting test with no-vfp"
+                ./compiler_daily_regression.py 'no-vfp' $comp_src
+            else
+                echo "Skipping test of 'no-vfp'"
+                sleep 4
+            fi
+            durations="$durations:!VFP reg"
+        fi
+        durations="$durations:$(($(date +%s)-$start_job))s"
+      cd ..
+    done
+fi
+durations="$durations:Nightly:$(($(date +%s)-$start))s:End:$(date --rfc-3339=seconds)"
+echo "$durations" >> $time_log
