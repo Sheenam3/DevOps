@@ -1,0 +1,123 @@
+//Transform a list into a set of actual build steps to be executed in parallel.
+
+// Our initial list of agents we want to execute tests in parallel
+def nodeLabels = ["ams-dla-u20-qa", "ams-dla-c07-qa"]
+
+pipeline {
+  agent none
+  environment {
+        token = "NDg5OTAwNjE3MTQwOoNqw8L5GWD4Q0AjX7MSYPHFPbFw"
+        jenkinsPasswordCredential = "sheenam-access-token-bitbucket"
+        bitbucketApiUrl = "https://bitbucket.micron.com/bbdc/scm/~sheenampatha/qa.git"
+        QA_DIR = "regression-script"  
+}
+  options {
+    timestamps()
+  }
+triggers {
+  cron '''TZ=Asia/Taipei
+15 17 * * *'''
+}
+
+  stages {   
+        stage('Code Clone...') {
+            steps {
+              script{
+                // The map we'll store the parallel steps in before executing them.
+                codeCloneStage = nodeLabels.collectEntries {
+                        ["${it}" : codeClone(it)]
+                }
+                // Actually run the steps in parallel - parallel takes a map as an argument,
+				// hence the above.
+                parallel codeCloneStage
+               }
+             }
+        }
+   		stage('Running Regression tests...') {
+        	steps {
+          		script {
+            		runTestsStage = nodeLabels.collectEntries {
+                    	    ["${it}" : runTests(it)]
+                    }
+                    parallel runTestsStage
+        	  	}
+        	}
+      	}
+
+  }
+
+}
+
+
+def codeClone(def name){
+  return {
+        node(name) {
+            stage("Run on ${name}") {
+                	withCredentials([gitUsernamePassword(credentialsId: 'sheenam-access-token-bitbucket', gitToolName: 'Default')]) {
+                      script {
+                        try {
+                            //Do a shallow clone of master and $target for faster builds/ reduced server load
+                       
+                                sh """#!/bin/bash
+                                    echo \$(pwd)
+                          			if [ -d "$QA_DIR" ]; then
+                                    	rm -rf $QA_DIR
+                                  		echo "Starting the cloning of $bitbucketApiUrl"
+                                    	mkdir $QA_DIR
+       									git clone -c http.extraHeader="Authorization: Bearer $token" $bitbucketApiUrl $QA_DIR
+                                    else
+                                    	git clone -c http.extraHeader="Authorization: Bearer $token" $bitbucketApiUrl $QA_DIR
+                                    fi
+                                
+                               """
+
+                      
+                        }
+                        catch (error) {
+                            echo "error returned from clone: ${error}"
+                            throw error
+                        }
+                	   }
+             		 }
+               }
+           } 
+  }
+}
+
+
+def runTests(def name){
+  return{
+    node(name) {
+      stage("Run on ${name}"){
+      	def node_name = "${name}"
+        script{
+      		try{
+                    sh """#!/bin/bash
+    					WORKING_DIR=\$(pwd)
+                        echo "Working...\$WORKING_DIR"
+                    	QA_WORKSPACE=\$WORKING_DIR/regression-script/
+                    	cd \$QA_WORKSPACE
+                        ubuntu_node="ams-dla-u20-qa"
+                        ln -s /var/mdla/model .
+                        ln -s /var/mdla/bitfiles .
+                        ln -s /var/mdla/NNEF-Tools .
+                        chmod u+x compiler_daily_regression_scripts/compiler_daily_regression.*
+                        if [[ "${name}" == "ams-dla-u20-qa" ]];then
+                        
+                            echo "Hello, if I am on ${name}"
+                        	./compiler_daily_regression_scripts/compiler_daily_regression.sh \$QA_WORKSPACE AC511
+                        else 
+                        	echo "I am on ${name}"
+                    		./compiler_daily_regression_scripts/compiler_daily_regression.sh \$QA_WORKSPACE SB852
+                        fi
+                    """
+              }
+        	catch(error){
+                    echo "error returned from Running regressions script: ${error}"
+                    throw error
+            }
+          }
+       }
+     }
+   }
+}
